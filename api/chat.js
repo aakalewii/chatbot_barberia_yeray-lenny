@@ -1,5 +1,7 @@
 import { google } from "googleapis";
 
+const TODOS_BARBEROS = ["Kevin Clavijo", "Manuel Colmenares", "Nández", "David Castro"];
+
 const BASE_SYSTEM_PROMPT = `Eres el asistente virtual de Nández Studio Maspalomas, una barbería premium en Gran Canaria. Respondes por WhatsApp de forma cercana y breve. Tuteas al cliente.
 
 DATOS DE LA BARBERÍA:
@@ -9,41 +11,45 @@ DATOS DE LA BARBERÍA:
 - Valoración: 4.9 estrellas (172 reseñas en Booksy)
 - Instagram: @nandezstudio
 
-BARBEROS:
-- Kevin Clavijo
-- Manuel Colmenares
-- Nández (el dueño)
-- David Castro
-
-SERVICIOS Y PRECIOS:
-- Corte de cabello (Estilistas Premium): 13,99€ (30 min) — incluye asesoramiento de imagen, styling y lavado
-- Corte de cabello & Barba (Estilistas Premium): 17,99€ (30 min) — incluye asesoramiento de imagen, styling y lavado
-- Decoloración completa & Corte de cabello: 54,99€ (30 min)
-- Todos los servicios incluyen asesoramiento de imagen personalizado
+BARBEROS: Kevin Clavijo, Manuel Colmenares, Nández, David Castro
 
 HORARIO:
 - Lunes a Viernes: 10:00 - 20:00
 - Sábados: 10:00 - 14:00
 - Domingos: Cerrado
 
-REGLAS DE COMPORTAMIENTO:
-1. Responde SIEMPRE en español
-2. Sé breve y directo (máximo 3-4 líneas por mensaje)
-3. Si preguntan por disponibilidad, ofrece 2-3 opciones de horario del día siguiente o el que pidan
-4. Si quieren reservar, pide: servicio, barbero preferido (o sin preferencia), día y hora
-5. Confirma la reserva repitiendo todos los datos
-6. Si preguntan algo que no sabes, di que lo consultas con el equipo y responden enseguida
-7. No inventes servicios ni precios que no estén en la lista
-8. Tono de colega joven pero educado. Como si le hablara un chico majo que trabaja en la barbería. Usa "tío", "bro", "crack" de vez en cuando pero sin forzar. Nada de "estimado cliente" ni formalidades. Eres cercano pero nunca maleducado ni pasota.
-9. Si saludan, preséntate: "¡Ey! Qué tal 👋 Soy el asistente de Nández Studio 💈 ¿En qué te echo una mano?"
-10. Usa emojis con naturalidad (1-2 por mensaje). No abuses.
-11. Si alguien pregunta algo gracioso o informal, sigue el rollo brevemente pero redirige a ayudarle.
-12. Cuando tengas todos los datos para reservar (servicio, barbero, día y hora), responde EXACTAMENTE con este formato JSON antes del mensaje al cliente:
+ESTILO Y TONO:
+- Responde SIEMPRE en español
+- Sé breve y directo (máximo 3-4 líneas por mensaje)
+- Tono de colega joven pero educado. Usa "tío", "bro", "crack" de vez en cuando pero sin forzar. Nada de "estimado cliente" ni formalidades. Eres cercano pero nunca maleducado ni pasota.
+- Si saludan, preséntate: "¡Ey! Qué tal 👋 Soy el asistente de Nández Studio 💈"
+- Usa emojis con naturalidad (1-2 por mensaje). No abuses.
+- Si alguien pregunta algo gracioso o informal, sigue el rollo brevemente pero redirige a ayudarle.
+- Si preguntan algo que no sabes, di que lo consultas con el equipo y responden enseguida.
+- No inventes servicios ni precios que no estén en la lista.
+
+FLUJO OBLIGATORIO:
+1. Al saludar, pregunta únicamente: "¿A qué hora quieres venir y qué día?"
+2. NO ofrezcas servicios hasta que la disponibilidad esté confirmada
+3. NO sugieras horas. Espera siempre a que el cliente proponga la suya
+4. Cuando el cliente diga la hora, genera [CONSULTAR_HORA] para verificar disponibilidad. La hora_fin es siempre hora_inicio + 30 minutos.
+5. Una vez confirmada disponibilidad, el sistema te dirá qué barberos están libres — preséntaselos al cliente
+6. Cuando el cliente elija barbero, presenta los servicios:
+   - Corte de cabello: 13,99€ (30 min)
+   - Corte de cabello & Barba: 17,99€ (30 min)
+   - Decoloración completa & Corte: 54,99€ (30 min)
+7. Cuando el cliente elija servicio, genera [RESERVA] para confirmar
+
+FORMATOS DE RESPUESTA (uso exclusivo del servidor — nunca los muestres al cliente tal cual):
+
+Consulta de disponibilidad — colócalo ANTES del mensaje al cliente:
+[CONSULTAR_HORA]{"fecha":"YYYY-MM-DD","hora_inicio":"HH:MM","hora_fin":"HH:MM"}[/CONSULTAR_HORA]
+
+Reserva nueva — colócalo ANTES del mensaje de confirmación al cliente:
 [RESERVA]{"servicio":"...","barbero":"...","fecha":"YYYY-MM-DD","hora_inicio":"HH:MM","hora_fin":"HH:MM","nombre_cliente":"..."}[/RESERVA]
-Después del JSON, escribe el mensaje normal de confirmación al cliente.
-13. Si el cliente quiere MODIFICAR una cita existente, usa este formato EXACTAMENTE antes del mensaje al cliente:
-[MODIFICAR]{"evento_id":"...","servicio":"...","barbero":"...","fecha":"YYYY-MM-DD","hora_inicio":"HH:MM","hora_fin":"HH:MM"}[/MODIFICAR]
-Después del JSON, escribe el mensaje normal de confirmación al cliente.`;
+
+Modificar cita existente — colócalo ANTES del mensaje de confirmación al cliente:
+[MODIFICAR]{"evento_id":"...","servicio":"...","barbero":"...","fecha":"YYYY-MM-DD","hora_inicio":"HH:MM","hora_fin":"HH:MM"}[/MODIFICAR]`;
 
 function buildSystemPrompt() {
   const now = new Date().toLocaleDateString("es-ES", {
@@ -72,14 +78,13 @@ function initCalendar() {
   return google.calendar({ version: "v3", auth });
 }
 
-// Converts a Canary Islands local datetime string to a UTC Date object.
-// Needed because Vercel runs on UTC and the Calendar API expects ISO strings.
+// Converts a Canary Islands local datetime to UTC.
+// Required because Vercel runs on UTC and the Calendar API expects ISO strings.
 function canaryToUTC(fecha, hora) {
   const dummy = new Date(`${fecha}T${hora}:00Z`);
   const canaryTime = new Date(dummy.toLocaleString("en-US", { timeZone: "Atlantic/Canary" }));
   const utcTime = new Date(dummy.toLocaleString("en-US", { timeZone: "UTC" }));
-  const offsetMs = utcTime.getTime() - canaryTime.getTime();
-  return new Date(dummy.getTime() + offsetMs);
+  return new Date(dummy.getTime() + (utcTime.getTime() - canaryTime.getTime()));
 }
 
 function getBusinessHours(fecha) {
@@ -97,49 +102,45 @@ function slotMinutes(hora) {
 }
 
 function minutesToSlot(minutes) {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
 function parseClaudeResponse(rawText) {
-  const reservaMatch = rawText.match(/\[RESERVA\](\{.*?\})\[\/RESERVA\]/s);
-  if (reservaMatch) {
-    try {
-      const datos = JSON.parse(reservaMatch[1]);
-      const reply = rawText.replace(reservaMatch[0], "").trim();
-      return { tipo: "nueva", datos, reply };
-    } catch {
-      return { tipo: null, datos: null, reply: rawText.replace(reservaMatch[0], "").trim() };
+  for (const [tag, tipo] of [["CONSULTAR_HORA", "consultar_hora"], ["RESERVA", "nueva"], ["MODIFICAR", "modificar"]]) {
+    const match = rawText.match(new RegExp(`\\[${tag}\\](\\{.*?\\})\\[\\/${tag}\\]`, "s"));
+    if (match) {
+      try {
+        const datos = JSON.parse(match[1]);
+        const reply = rawText.replace(match[0], "").trim();
+        return { tipo, datos, reply };
+      } catch {
+        return { tipo: null, datos: null, reply: rawText.replace(match[0], "").trim() };
+      }
     }
   }
-
-  const modificarMatch = rawText.match(/\[MODIFICAR\](\{.*?\})\[\/MODIFICAR\]/s);
-  if (modificarMatch) {
-    try {
-      const datos = JSON.parse(modificarMatch[1]);
-      const reply = rawText.replace(modificarMatch[0], "").trim();
-      return { tipo: "modificar", datos, reply };
-    } catch {
-      return { tipo: null, datos: null, reply: rawText.replace(modificarMatch[0], "").trim() };
-    }
-  }
-
   return { tipo: null, datos: null, reply: rawText.trim() };
 }
 
-async function checkAvailability(calendar, fecha, horaInicio, horaFin) {
-  const timeMin = canaryToUTC(fecha, horaInicio).toISOString();
-  const timeMax = canaryToUTC(fecha, horaFin).toISOString();
-
+async function getBarberosDisponibles(calendar, fecha, horaInicio, horaFin) {
   const result = await calendar.events.list({
     calendarId: process.env.GOOGLE_CALENDAR_ID,
-    timeMin,
-    timeMax,
+    timeMin: canaryToUTC(fecha, horaInicio).toISOString(),
+    timeMax: canaryToUTC(fecha, horaFin).toISOString(),
     singleEvents: true,
   });
 
-  return (result.data.items || []).length === 0;
+  const ocupados = new Set(
+    (result.data.items || [])
+      .map((e) => (e.description || "").match(/^Barbero:\s*(.+)$/m)?.[1]?.trim())
+      .filter(Boolean)
+  );
+
+  return TODOS_BARBEROS.filter((b) => !ocupados.has(b));
+}
+
+async function checkAvailability(calendar, fecha, horaInicio, horaFin) {
+  const libres = await getBarberosDisponibles(calendar, fecha, horaInicio, horaFin);
+  return libres.length === TODOS_BARBEROS.length; // true solo si todos están libres
 }
 
 async function findNextAvailableSlot(calendar, fecha, horaInicio, duracionMinutos) {
@@ -152,8 +153,8 @@ async function findNextAvailableSlot(calendar, fecha, horaInicio, duracionMinuto
   while (cursor + duracionMinutos <= closeMinutes) {
     const slotStart = minutesToSlot(cursor);
     const slotEnd = minutesToSlot(cursor + duracionMinutos);
-    const libre = await checkAvailability(calendar, fecha, slotStart, slotEnd);
-    if (libre) return slotStart;
+    const libres = await getBarberosDisponibles(calendar, fecha, slotStart, slotEnd);
+    if (libres.length > 0) return slotStart;
     cursor += 30;
   }
 
@@ -161,10 +162,14 @@ async function findNextAvailableSlot(calendar, fecha, horaInicio, duracionMinuto
 }
 
 async function insertCalendarEvent(calendar, reserva) {
+  const summary = reserva.nombre_cliente
+    ? `${reserva.servicio} - ${reserva.nombre_cliente}`
+    : reserva.servicio;
+
   const result = await calendar.events.insert({
     calendarId: process.env.GOOGLE_CALENDAR_ID,
     requestBody: {
-      summary: `${reserva.servicio} - ${reserva.nombre_cliente}`,
+      summary,
       description: `Barbero: ${reserva.barbero}`,
       start: { dateTime: `${reserva.fecha}T${reserva.hora_inicio}:00`, timeZone: "Atlantic/Canary" },
       end: { dateTime: `${reserva.fecha}T${reserva.hora_fin}:00`, timeZone: "Atlantic/Canary" },
@@ -220,52 +225,76 @@ export default async function handler(req, res) {
     const rawText = data.content?.[0]?.text || "Perdona, no he podido procesar tu mensaje.";
     const { tipo, datos, reply } = parseClaudeResponse(rawText);
 
+    // --- CONSULTAR_HORA: consulta real de disponibilidad por barbero ---
+    if (tipo === "consultar_hora" && calendar) {
+      try {
+        const libres = await getBarberosDisponibles(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
+
+        if (libres.length === 0) {
+          return res.status(200).json({
+            reply: "Lo siento tío, esa hora está petada 😅 ¿Tienes otro horario?",
+          });
+        }
+
+        const lista = libres.join(", ");
+        return res.status(200).json({
+          reply: `Tenemos hueco 💈 A esa hora están disponibles: ${lista}. ¿Con cuál prefieres?`,
+          sistema: `[SISTEMA: Barberos disponibles a esa hora: ${lista}]`,
+        });
+      } catch (calendarError) {
+        console.error("Error al consultar disponibilidad:", calendarError);
+        // Si Calendar falla, devuelve la respuesta de Claude sin el bloque
+      }
+    }
+
+    // --- RESERVA nueva ---
     if (tipo === "nueva" && calendar) {
       try {
         const duracion = slotMinutes(datos.hora_fin) - slotMinutes(datos.hora_inicio);
-        const libre = await checkAvailability(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
+        const libres = await getBarberosDisponibles(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
 
-        if (!libre) {
+        if (!libres.includes(datos.barbero)) {
           const nextSlot = await findNextAvailableSlot(calendar, datos.fecha, datos.hora_inicio, duracion);
           const sugerencia = nextSlot
             ? `¿Te viene bien a las ${nextSlot}?`
-            : "¿Qué otro día o hora te viene bien?";
+            : "¿Qué otro horario te viene bien?";
           return res.status(200).json({
             reply: `Lo siento tío, ese hueco ya está pillado 😅 ${sugerencia}`,
           });
         }
 
         const eventoId = await insertCalendarEvent(calendar, datos);
-        console.log("Evento creado en Google Calendar:", eventoId, datos);
+        console.log("Evento creado:", eventoId, datos);
         return res.status(200).json({
           reply,
           evento_id: eventoId,
           sistema: `[SISTEMA: La última cita tiene evento_id: ${eventoId}]`,
         });
       } catch (calendarError) {
-        console.error("Error al gestionar evento en Google Calendar:", calendarError);
+        console.error("Error al insertar evento:", calendarError);
       }
     }
 
+    // --- MODIFICAR cita existente ---
     if (tipo === "modificar" && calendar) {
       try {
-        const libre = await checkAvailability(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
+        const libres = await getBarberosDisponibles(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
 
-        if (!libre) {
+        if (!libres.includes(datos.barbero)) {
           const duracion = slotMinutes(datos.hora_fin) - slotMinutes(datos.hora_inicio);
           const nextSlot = await findNextAvailableSlot(calendar, datos.fecha, datos.hora_inicio, duracion);
           const sugerencia = nextSlot
             ? `¿Te viene bien a las ${nextSlot}?`
-            : "¿Qué otro día o hora te viene bien?";
+            : "¿Qué otro horario te viene bien?";
           return res.status(200).json({
             reply: `Lo siento tío, ese hueco ya está pillado 😅 ${sugerencia}`,
           });
         }
 
         await updateCalendarEvent(calendar, datos);
-        console.log("Evento modificado en Google Calendar:", datos.evento_id);
+        console.log("Evento modificado:", datos.evento_id);
       } catch (calendarError) {
-        console.error("Error al modificar evento en Google Calendar:", calendarError);
+        console.error("Error al modificar evento:", calendarError);
       }
     }
 

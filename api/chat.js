@@ -37,7 +37,50 @@ REGLAS DE COMPORTAMIENTO:
 8. Tono de colega joven pero educado. Como si le hablara un chico majo que trabaja en la barbería. Usa "tío", "bro", "crack" de vez en cuando pero sin forzar. Nada de "estimado cliente" ni formalidades. Eres cercano pero nunca maleducado ni pasota.
 9. Si saludan, preséntate: "¡Ey! Qué tal 👋 Soy el asistente de Nández Studio 💈 ¿En qué te echo una mano?"
 10. Usa emojis con naturalidad (1-2 por mensaje). No abuses.
-11. Si alguien pregunta algo gracioso o informal, sigue el rollo brevemente pero redirige a ayudarle.`;
+11. Si alguien pregunta algo gracioso o informal, sigue el rollo brevemente pero redirige a ayudarle.
+12. Cuando tengas todos los datos para reservar (servicio, barbero, día y hora), responde EXACTAMENTE con este formato JSON antes del mensaje al cliente:
+[RESERVA]{"servicio":"...","barbero":"...","fecha":"YYYY-MM-DD","hora_inicio":"HH:MM","hora_fin":"HH:MM","nombre_cliente":"..."}[/RESERVA]
+Después del JSON, escribe el mensaje normal de confirmación al cliente.`;
+
+function initCalendar() {
+  const auth = new google.auth.JWT(
+    process.env.GOOGLE_CLIENT_EMAIL,
+    null,
+    process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    ["https://www.googleapis.com/auth/calendar"]
+  );
+  return google.calendar({ version: "v3", auth });
+}
+
+function parseClaudeResponse(rawText) {
+  const match = rawText.match(/\[RESERVA\](\{.*?\})\[\/RESERVA\]/s);
+  if (!match) return { reserva: null, reply: rawText.trim() };
+
+  try {
+    const reserva = JSON.parse(match[1]);
+    const reply = rawText.replace(match[0], "").trim();
+    return { reserva, reply };
+  } catch {
+    // JSON malformado: devuelve el texto limpio sin el bloque
+    const reply = rawText.replace(match[0], "").trim();
+    return { reserva: null, reply };
+  }
+}
+
+async function insertCalendarEvent(calendar, reserva) {
+  const startDateTime = `${reserva.fecha}T${reserva.hora_inicio}:00`;
+  const endDateTime = `${reserva.fecha}T${reserva.hora_fin}:00`;
+
+  await calendar.events.insert({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    requestBody: {
+      summary: `${reserva.servicio} - ${reserva.nombre_cliente}`,
+      description: `Barbero: ${reserva.barbero}`,
+      start: { dateTime: startDateTime, timeZone: "Atlantic/Canary" },
+      end: { dateTime: endDateTime, timeZone: "Atlantic/Canary" },
+    },
+  });
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -46,15 +89,9 @@ export default async function handler(req, res) {
 
   const { messages } = req.body;
 
+  let calendar;
   try {
-    const auth = new google.auth.JWT(
-      process.env.GOOGLE_CLIENT_EMAIL,
-      null,
-      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-      ["https://www.googleapis.com/auth/calendar"]
-    );
-    const calendar = google.calendar({ version: "v3", auth });
-    console.log("Conexión a Google Calendar lista.", calendar.context._options.auth.email);
+    calendar = initCalendar();
   } catch (calendarError) {
     console.error("Error al inicializar Google Calendar:", calendarError);
   }
@@ -76,7 +113,19 @@ export default async function handler(req, res) {
     });
 
     const data = await response.json();
-    const reply = data.content?.[0]?.text || "Perdona, no he podido procesar tu mensaje.";
+    const rawText = data.content?.[0]?.text || "Perdona, no he podido procesar tu mensaje.";
+
+    const { reserva, reply } = parseClaudeResponse(rawText);
+
+    if (reserva && calendar) {
+      try {
+        await insertCalendarEvent(calendar, reserva);
+        console.log("Evento creado en Google Calendar:", reserva);
+      } catch (calendarError) {
+        console.error("Error al insertar evento en Google Calendar:", calendarError);
+      }
+    }
+
     return res.status(200).json({ reply });
   } catch (err) {
     console.error("Error al conectar con Anthropic:", err);

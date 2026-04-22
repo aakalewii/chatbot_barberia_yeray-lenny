@@ -38,7 +38,16 @@ FLUJO OBLIGATORIO:
    - Corte de cabello: 13,99€ (30 min)
    - Corte de cabello & Barba: 17,99€ (30 min)
    - Decoloración completa & Corte: 54,99€ (30 min)
-7. Cuando el cliente elija servicio, genera [RESERVA] para confirmar
+7. Cuando el cliente elija servicio, pide su nombre: "¿Y cómo te llamo para la reserva?"
+8. Cuando tengas el nombre del cliente, genera [RESERVA] para confirmar
+
+REGLAS ESTRICTAS:
+1. Nunca saltes pasos. El orden es: hora → barbero → servicio → nombre → confirmación. Siempre.
+2. Si el cliente mezcla información de pasos distintos en un mismo mensaje (por ejemplo dice la hora y el servicio a la vez), recoge solo el dato del paso actual e ignora el resto hasta llegar a ese paso.
+3. Si en algún momento no tienes claro qué paso toca, vuelve al último dato que falta y pregúntalo.
+4. Nunca confirmes una reserva sin tener los 4 datos: hora, barbero, servicio y nombre del cliente.
+5. Antes de generar el bloque [RESERVA], SIEMPRE pide el nombre del cliente si no lo sabes todavía. Nunca generes [RESERVA] sin tener el nombre del cliente confirmado.
+6. El nombre del cliente y el nombre del barbero son dos datos completamente separados. El barbero se elige en el paso de disponibilidad. El nombre del cliente se recoge en el paso final antes de confirmar. Nunca uses el nombre del cliente como si fuera un barbero ni viceversa.
 
 FORMATOS DE RESPUESTA (uso exclusivo del servidor — nunca los muestres al cliente tal cual):
 
@@ -250,6 +259,12 @@ export default async function handler(req, res) {
     // --- RESERVA nueva ---
     if (tipo === "nueva" && calendar) {
       try {
+        if (!TODOS_BARBEROS.includes(datos.barbero)) {
+          return res.status(200).json({
+            reply: "Perdona, ha habido un lío con el barbero. ¿Me confirmas con cuál quedamos? Tenemos a Kevin Clavijo, Manuel Colmenares, Nández y David Castro.",
+          });
+        }
+
         const duracion = slotMinutes(datos.hora_fin) - slotMinutes(datos.hora_inicio);
         const libres = await getBarberosDisponibles(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
 
@@ -278,6 +293,12 @@ export default async function handler(req, res) {
     // --- MODIFICAR cita existente ---
     if (tipo === "modificar" && calendar) {
       try {
+        if (!TODOS_BARBEROS.includes(datos.barbero)) {
+          return res.status(200).json({
+            reply: "Perdona, ha habido un lío con el barbero. ¿Me confirmas con cuál quedamos? Tenemos a Kevin Clavijo, Manuel Colmenares, Nández y David Castro.",
+          });
+        }
+
         const libres = await getBarberosDisponibles(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
 
         if (!libres.includes(datos.barbero)) {

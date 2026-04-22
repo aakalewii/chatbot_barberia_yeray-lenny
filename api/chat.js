@@ -1,15 +1,6 @@
+import { google } from "googleapis";
 
-import { google } from "googleapis"; // 1. Importas Google arriba del todo
-
-
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const { messages } = req.body;
-
-  const SYSTEM_PROMPT = `Eres el asistente virtual de Nández Studio Maspalomas, una barbería premium en Gran Canaria. Respondes por WhatsApp de forma cercana y breve. Tuteas al cliente.
+const SYSTEM_PROMPT = `Eres el asistente virtual de Nández Studio Maspalomas, una barbería premium en Gran Canaria. Respondes por WhatsApp de forma cercana y breve. Tuteas al cliente.
 
 DATOS DE LA BARBERÍA:
 - Nombre: Nández Studio Maspalomas
@@ -48,6 +39,26 @@ REGLAS DE COMPORTAMIENTO:
 10. Usa emojis con naturalidad (1-2 por mensaje). No abuses.
 11. Si alguien pregunta algo gracioso o informal, sigue el rollo brevemente pero redirige a ayudarle.`;
 
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const { messages } = req.body;
+
+  try {
+    const auth = new google.auth.JWT(
+      process.env.GOOGLE_CLIENT_EMAIL,
+      null,
+      process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+      ["https://www.googleapis.com/auth/calendar"]
+    );
+    const calendar = google.calendar({ version: "v3", auth });
+    console.log("Conexión a Google Calendar lista.", calendar.context._options.auth.email);
+  } catch (calendarError) {
+    console.error("Error al inicializar Google Calendar:", calendarError);
+  }
+
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -68,40 +79,7 @@ REGLAS DE COMPORTAMIENTO:
     const reply = data.content?.[0]?.text || "Perdona, no he podido procesar tu mensaje.";
     return res.status(200).json({ reply });
   } catch (err) {
+    console.error("Error al conectar con Anthropic:", err);
     return res.status(500).json({ error: "Error al conectar con el asistente." });
   }
-}
-
-
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const { messages } = req.body;
-
-  // --- 2. CONFIGURACIÓN DE LA PARANOIA (GOOGLE CALENDAR) ---
-  try {
-    // Le decimos a Google: "Fíate de mí, aquí tienes mi carnet (el JSON)"
-    const auth = new google.auth.GoogleAuth({
-      keyFile: "./google-credentials.json", 
-      scopes: ["https://www.googleapis.com/auth/calendar"],
-    });
-
-    // Creamos la conexión al calendario
-    const calendar = google.calendar({ version: "v3", auth });
-
-    // (Opcional) Prueba rápida para ver si funciona:
-    console.log("¡Conexión a Google Calendar lista!");
-
-  } catch (error) {
-    console.error("Houston, tenemos un problema con Google:", error);
-  }
-  // --- FIN DE LA CONFIGURACIÓN ---
-
-
-  // --- 3. TU CÓDIGO DE CLAUDE (ANTHROPIC) ---
-  const SYSTEM_PROMPT = `Eres el asistente virtual de Nández Studio Maspalomas...`;
-
-  // ... (aquí sigue tu fetch a la API de Anthropic)
 }

@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 
-const SYSTEM_PROMPT = `Eres el asistente virtual de Nández Studio Maspalomas, una barbería premium en Gran Canaria. Respondes por WhatsApp de forma cercana y breve. Tuteas al cliente.
+const BASE_SYSTEM_PROMPT = `Eres el asistente virtual de Nández Studio Maspalomas, una barbería premium en Gran Canaria. Respondes por WhatsApp de forma cercana y breve. Tuteas al cliente.
 
 DATOS DE LA BARBERÍA:
 - Nombre: Nández Studio Maspalomas
@@ -40,15 +40,27 @@ REGLAS DE COMPORTAMIENTO:
 11. Si alguien pregunta algo gracioso o informal, sigue el rollo brevemente pero redirige a ayudarle.
 12. Cuando tengas todos los datos para reservar (servicio, barbero, día y hora), responde EXACTAMENTE con este formato JSON antes del mensaje al cliente:
 [RESERVA]{"servicio":"...","barbero":"...","fecha":"YYYY-MM-DD","hora_inicio":"HH:MM","hora_fin":"HH:MM","nombre_cliente":"..."}[/RESERVA]
+Después del JSON, escribe el mensaje normal de confirmación al cliente.
+13. Si el cliente quiere MODIFICAR una cita existente, usa este formato EXACTAMENTE antes del mensaje al cliente:
+[MODIFICAR]{"evento_id":"...","servicio":"...","barbero":"...","fecha":"YYYY-MM-DD","hora_inicio":"HH:MM","hora_fin":"HH:MM"}[/MODIFICAR]
 Después del JSON, escribe el mensaje normal de confirmación al cliente.`;
 
+function buildSystemPrompt() {
+  const now = new Date().toLocaleDateString("es-ES", {
+    timeZone: "Atlantic/Canary",
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  return `Hoy es ${now}. El horario de la barbería es Lunes-Viernes 10:00-20:00 y Sábados 10:00-14:00. Nunca agendes citas fuera de ese horario ni en domingo.\n\n${BASE_SYSTEM_PROMPT}`;
+}
+
 function initCalendar() {
-  // 1. Limpiamos la clave privada por si acaso hay problemas con los saltos de línea
-  const privateKey = process.env.GOOGLE_PRIVATE_KEY 
-    ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n") 
+  const privateKey = process.env.GOOGLE_PRIVATE_KEY
+    ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n")
     : undefined;
 
-  // 2. Usamos GoogleAuth en lugar de JWT para que gestione los tokens automáticamente
   const auth = new google.auth.GoogleAuth({
     credentials: {
       client_email: process.env.GOOGLE_CLIENT_EMAIL,
@@ -60,32 +72,116 @@ function initCalendar() {
   return google.calendar({ version: "v3", auth });
 }
 
-function parseClaudeResponse(rawText) {
-  const match = rawText.match(/\[RESERVA\](\{.*?\})\[\/RESERVA\]/s);
-  if (!match) return { reserva: null, reply: rawText.trim() };
+// Converts a Canary Islands local datetime string to a UTC Date object.
+// Needed because Vercel runs on UTC and the Calendar API expects ISO strings.
+function canaryToUTC(fecha, hora) {
+  const dummy = new Date(`${fecha}T${hora}:00Z`);
+  const canaryTime = new Date(dummy.toLocaleString("en-US", { timeZone: "Atlantic/Canary" }));
+  const utcTime = new Date(dummy.toLocaleString("en-US", { timeZone: "UTC" }));
+  const offsetMs = utcTime.getTime() - canaryTime.getTime();
+  return new Date(dummy.getTime() + offsetMs);
+}
 
-  try {
-    const reserva = JSON.parse(match[1]);
-    const reply = rawText.replace(match[0], "").trim();
-    return { reserva, reply };
-  } catch {
-    // JSON malformado: devuelve el texto limpio sin el bloque
-    const reply = rawText.replace(match[0], "").trim();
-    return { reserva: null, reply };
+function getBusinessHours(fecha) {
+  const weekday = new Date(`${fecha}T12:00:00Z`)
+    .toLocaleDateString("es-ES", { timeZone: "Atlantic/Canary", weekday: "long" })
+    .toLowerCase();
+  if (weekday === "domingo") return null;
+  if (weekday === "sábado") return { open: "10:00", close: "14:00" };
+  return { open: "10:00", close: "20:00" };
+}
+
+function slotMinutes(hora) {
+  const [h, m] = hora.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function minutesToSlot(minutes) {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function parseClaudeResponse(rawText) {
+  const reservaMatch = rawText.match(/\[RESERVA\](\{.*?\})\[\/RESERVA\]/s);
+  if (reservaMatch) {
+    try {
+      const datos = JSON.parse(reservaMatch[1]);
+      const reply = rawText.replace(reservaMatch[0], "").trim();
+      return { tipo: "nueva", datos, reply };
+    } catch {
+      return { tipo: null, datos: null, reply: rawText.replace(reservaMatch[0], "").trim() };
+    }
   }
+
+  const modificarMatch = rawText.match(/\[MODIFICAR\](\{.*?\})\[\/MODIFICAR\]/s);
+  if (modificarMatch) {
+    try {
+      const datos = JSON.parse(modificarMatch[1]);
+      const reply = rawText.replace(modificarMatch[0], "").trim();
+      return { tipo: "modificar", datos, reply };
+    } catch {
+      return { tipo: null, datos: null, reply: rawText.replace(modificarMatch[0], "").trim() };
+    }
+  }
+
+  return { tipo: null, datos: null, reply: rawText.trim() };
+}
+
+async function checkAvailability(calendar, fecha, horaInicio, horaFin) {
+  const timeMin = canaryToUTC(fecha, horaInicio).toISOString();
+  const timeMax = canaryToUTC(fecha, horaFin).toISOString();
+
+  const result = await calendar.events.list({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    timeMin,
+    timeMax,
+    singleEvents: true,
+  });
+
+  return (result.data.items || []).length === 0;
+}
+
+async function findNextAvailableSlot(calendar, fecha, horaInicio, duracionMinutos) {
+  const hours = getBusinessHours(fecha);
+  if (!hours) return null;
+
+  const closeMinutes = slotMinutes(hours.close);
+  let cursor = slotMinutes(horaInicio) + duracionMinutos;
+
+  while (cursor + duracionMinutos <= closeMinutes) {
+    const slotStart = minutesToSlot(cursor);
+    const slotEnd = minutesToSlot(cursor + duracionMinutos);
+    const libre = await checkAvailability(calendar, fecha, slotStart, slotEnd);
+    if (libre) return slotStart;
+    cursor += 30;
+  }
+
+  return null;
 }
 
 async function insertCalendarEvent(calendar, reserva) {
-  const startDateTime = `${reserva.fecha}T${reserva.hora_inicio}:00`;
-  const endDateTime = `${reserva.fecha}T${reserva.hora_fin}:00`;
-
-  await calendar.events.insert({
+  const result = await calendar.events.insert({
     calendarId: process.env.GOOGLE_CALENDAR_ID,
     requestBody: {
       summary: `${reserva.servicio} - ${reserva.nombre_cliente}`,
       description: `Barbero: ${reserva.barbero}`,
-      start: { dateTime: startDateTime, timeZone: "Atlantic/Canary" },
-      end: { dateTime: endDateTime, timeZone: "Atlantic/Canary" },
+      start: { dateTime: `${reserva.fecha}T${reserva.hora_inicio}:00`, timeZone: "Atlantic/Canary" },
+      end: { dateTime: `${reserva.fecha}T${reserva.hora_fin}:00`, timeZone: "Atlantic/Canary" },
+    },
+  });
+  return result.data.id;
+}
+
+async function updateCalendarEvent(calendar, modificar) {
+  await calendar.events.update({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    eventId: modificar.evento_id,
+    requestBody: {
+      summary: modificar.servicio,
+      description: `Barbero: ${modificar.barbero}`,
+      start: { dateTime: `${modificar.fecha}T${modificar.hora_inicio}:00`, timeZone: "Atlantic/Canary" },
+      end: { dateTime: `${modificar.fecha}T${modificar.hora_fin}:00`, timeZone: "Atlantic/Canary" },
     },
   });
 }
@@ -115,22 +211,61 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 500,
-        system: SYSTEM_PROMPT,
+        system: buildSystemPrompt(),
         messages,
       }),
     });
 
     const data = await response.json();
     const rawText = data.content?.[0]?.text || "Perdona, no he podido procesar tu mensaje.";
+    const { tipo, datos, reply } = parseClaudeResponse(rawText);
 
-    const { reserva, reply } = parseClaudeResponse(rawText);
-
-    if (reserva && calendar) {
+    if (tipo === "nueva" && calendar) {
       try {
-        await insertCalendarEvent(calendar, reserva);
-        console.log("Evento creado en Google Calendar:", reserva);
+        const duracion = slotMinutes(datos.hora_fin) - slotMinutes(datos.hora_inicio);
+        const libre = await checkAvailability(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
+
+        if (!libre) {
+          const nextSlot = await findNextAvailableSlot(calendar, datos.fecha, datos.hora_inicio, duracion);
+          const sugerencia = nextSlot
+            ? `¿Te viene bien a las ${nextSlot}?`
+            : "¿Qué otro día o hora te viene bien?";
+          return res.status(200).json({
+            reply: `Lo siento tío, ese hueco ya está pillado 😅 ${sugerencia}`,
+          });
+        }
+
+        const eventoId = await insertCalendarEvent(calendar, datos);
+        console.log("Evento creado en Google Calendar:", eventoId, datos);
+        return res.status(200).json({
+          reply,
+          evento_id: eventoId,
+          sistema: `[SISTEMA: La última cita tiene evento_id: ${eventoId}]`,
+        });
       } catch (calendarError) {
-        console.error("Error al insertar evento en Google Calendar:", calendarError);
+        console.error("Error al gestionar evento en Google Calendar:", calendarError);
+      }
+    }
+
+    if (tipo === "modificar" && calendar) {
+      try {
+        const libre = await checkAvailability(calendar, datos.fecha, datos.hora_inicio, datos.hora_fin);
+
+        if (!libre) {
+          const duracion = slotMinutes(datos.hora_fin) - slotMinutes(datos.hora_inicio);
+          const nextSlot = await findNextAvailableSlot(calendar, datos.fecha, datos.hora_inicio, duracion);
+          const sugerencia = nextSlot
+            ? `¿Te viene bien a las ${nextSlot}?`
+            : "¿Qué otro día o hora te viene bien?";
+          return res.status(200).json({
+            reply: `Lo siento tío, ese hueco ya está pillado 😅 ${sugerencia}`,
+          });
+        }
+
+        await updateCalendarEvent(calendar, datos);
+        console.log("Evento modificado en Google Calendar:", datos.evento_id);
+      } catch (calendarError) {
+        console.error("Error al modificar evento en Google Calendar:", calendarError);
       }
     }
 

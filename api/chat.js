@@ -43,12 +43,20 @@ REGLAS DE COMPORTAMIENTO:
 Después del JSON, escribe el mensaje normal de confirmación al cliente.`;
 
 function initCalendar() {
-  const auth = new google.auth.JWT(
-    process.env.GOOGLE_CLIENT_EMAIL,
-    null,
-    process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    ["https://www.googleapis.com/auth/calendar"]
-  );
+  // 1. Limpiamos la clave privada por si acaso hay problemas con los saltos de línea
+  const privateKey = process.env.GOOGLE_PRIVATE_KEY 
+    ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n") 
+    : undefined;
+
+  // 2. Usamos GoogleAuth en lugar de JWT para que gestione los tokens automáticamente
+  const auth = new google.auth.GoogleAuth({
+    credentials: {
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      private_key: privateKey,
+    },
+    scopes: ["https://www.googleapis.com/auth/calendar"],
+  });
+
   return google.calendar({ version: "v3", auth });
 }
 
